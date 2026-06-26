@@ -1,4 +1,19 @@
-.DS_Store
-.cache/
-sdkconfig.old
+# Build artifacts
 build/
+.cache/
+
+# Private keys and certificates
+main/server.crt
+main/server.key
+
+# Personal audio data
+main/shh.wav
+
+# ESP-IDF generated
+sdkconfig.old
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/

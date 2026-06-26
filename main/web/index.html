@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dosypator</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#111827;color:#f3f4f6;min-height:100vh;padding:16px}
+h1{text-align:center;color:#f87171;font-size:1.25rem;margin-bottom:4px}
+.sub{text-align:center;color:#6b7280;font-size:.75rem;margin-bottom:20px}
+.slot{background:#1f2937;border-radius:12px;padding:14px;margin-bottom:10px;border:1px solid #374151}
+.slot.has-track{border-color:#22c55e55}
+.row1{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.num{font-size:1.5rem;font-weight:700;color:#f87171;min-width:28px}
+.info{flex:1}
+.track-name{font-size:.85rem;font-weight:600}
+.track-status{font-size:.7rem;color:#6b7280;margin-top:2px}
+.track-status.ok{color:#22c55e}
+.row2{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{border:none;border-radius:8px;padding:7px 13px;font-size:.8rem;font-weight:600;cursor:pointer;transition:all .15s}
+button:disabled{opacity:.35;cursor:not-allowed}
+.btn-rec{background:#dc2626;color:#fff}
+.btn-rec.live{background:#ef4444;animation:ring 1.2s infinite}
+.btn-play{background:#0d1f3c;color:#4ade80;border:1px solid #22c55e}
+.btn-save{background:#14532d;color:#86efac;border:1px solid #22c55e}
+.timer{font-size:.75rem;color:#ef4444;font-variant-numeric:tabular-nums;min-width:34px;display:none}
+.active-wrap{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:.75rem;color:#9ca3af;cursor:pointer;white-space:nowrap}
+input[type=checkbox]{accent-color:#f87171;width:16px;height:16px}
+.progress{height:3px;background:#374151;border-radius:2px;margin-top:8px;display:none}
+.progress-bar{height:100%;background:#f87171;border-radius:2px;width:0;transition:width 1s linear}
+.save-all{display:block;width:100%;background:#f87171;color:#fff;border-radius:10px;padding:13px;font-size:.95rem;font-weight:700;margin-top:16px;cursor:pointer;border:none}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2937;border:1px solid #374151;color:#f3f4f6;padding:10px 20px;border-radius:20px;font-size:.8rem;opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
+.toast.show{opacity:1}
+@keyframes ring{0%{box-shadow:0 0 0 0 rgba(239,68,68,.7)}70%{box-shadow:0 0 0 8px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}
+</style>
+</head>
+<body>
+<h1>&#127908; Dosypator</h1>
+<p class="sub">Wi-Fi: Dosypator &nbsp;·&nbsp; 192.168.4.1</p>
+<div id="slots"></div>
+<button class="save-all" onclick="saveConfig()">&#128190; Save Active Slots</button>
+<div class="toast" id="toast"></div>
+
+<script>
+const N = 5, MAX_SEC = 60;
+const state = {};    // slot → {recorded, active}
+const pending = {};  // slot → Blob (recorded, not yet uploaded)
+const recState = {}; // slot → {mr, interval}
+
+function toast(msg, dur) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(function() { el.classList.remove('show'); }, dur || 3000);
+}
+
+function loadStatus() {
+  fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
+    d.slots.forEach(function(s) { state[s.id] = {recorded: s.recorded, active: s.active}; });
+    render();
+  }).catch(function() { render(); });
+}
+
+function render() {
+  const c = document.getElementById('slots');
+  c.innerHTML = '';
+  for (let i = 0; i < N; i++) {
+    const s = state[i] || {recorded: false, active: false};
+    const hasPending = !!pending[i];
+    const div = document.createElement('div');
+    div.className = 'slot' + (s.recorded ? ' has-track' : '');
+    div.innerHTML =
+      '<div class="row1">' +
+        '<div class="num">' + (i + 1) + '</div>' +
+        '<div class="info">' +
+          '<div class="track-name">Track ' + (i + 1) + '</div>' +
+          '<div class="track-status' + (s.recorded ? ' ok' : '') + '" id="st-' + i + '">' +
+            (s.recorded ? '&#9679; Recorded' : '&#9675; Empty') +
+          '</div>' +
+        '</div>' +
+        '<label class="active-wrap">' +
+          '<input type="checkbox" id="cb-' + i + '"' + (s.active ? ' checked' : '') + '>Active' +
+        '</label>' +
+      '</div>' +
+      '<div class="row2">' +
+        '<button class="btn-rec" id="br-' + i + '" onclick="toggleRec(' + i + ')">&#9210; Rec</button>' +
+        '<span class="timer" id="ti-' + i + '">0s</span>' +
+        '<button class="btn-play" id="bp-' + i + '" onclick="playSlot(' + i + ')"' +
+          (s.recorded ? '' : ' disabled') + '>&#9654; Play</button>' +
+        (hasPending
+          ? '<button class="btn-save" id="bs-' + i + '" onclick="uploadSlot(' + i + ')">&#8679; Save</button>'
+          : '<span id="bs-' + i + '"></span>') +
+      '</div>' +
+      '<div class="progress" id="pg-' + i + '">' +
+        '<div class="progress-bar" id="pgb-' + i + '"></div>' +
+      '</div>';
+    c.appendChild(div);
+  }
+}
+
+function toggleRec(slot) {
+  if (recState[slot]) { stopRec(slot); return; }
+  navigator.mediaDevices.getUserMedia({audio: true, video: false}).then(function(stream) {
+    const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+    const mime = types.find(function(t) { return !t || MediaRecorder.isTypeSupported(t); }) || '';
+    const mr = new MediaRecorder(stream, mime ? {mimeType: mime} : {});
+    const chunks = [];
+    mr.ondataavailable = function(e) { if (e.data.size > 0) chunks.push(e.data); };
+    mr.onstop = function() {
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      pending[slot] = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
+      const brEl = document.getElementById('br-' + slot);
+      if (brEl) { brEl.textContent = '&#9210; Rec'; brEl.classList.remove('live'); }
+      const tiEl = document.getElementById('ti-' + slot);
+      if (tiEl) tiEl.style.display = 'none';
+      const pgEl = document.getElementById('pg-' + slot);
+      if (pgEl) pgEl.style.display = 'none';
+      const bsEl = document.getElementById('bs-' + slot);
+      if (bsEl) {
+        bsEl.className = 'btn-save';
+        bsEl.textContent = '&#8679; Save';
+        bsEl.disabled = false;
+        bsEl.onclick = function() { uploadSlot(slot); };
+        bsEl.style.display = '';
+      }
+      toast('Recording ready — press Save');
+      delete recState[slot];
+    };
+
+    let elapsed = 0;
+    const tiEl = document.getElementById('ti-' + slot);
+    const pgEl = document.getElementById('pg-' + slot);
+    const pgbEl = document.getElementById('pgb-' + slot);
+    if (tiEl) tiEl.style.display = 'inline';
+    if (pgEl) pgEl.style.display = 'block';
+
+    const iv = setInterval(function() {
+      elapsed++;
+      if (tiEl) tiEl.textContent = elapsed + 's';
+      if (pgbEl) pgbEl.style.width = (elapsed / MAX_SEC * 100) + '%';
+      if (elapsed >= MAX_SEC) { clearInterval(iv); stopRec(slot); }
+    }, 1000);
+
+    recState[slot] = {mr: mr, interval: iv};
+    mr.start(250);
+    const brEl = document.getElementById('br-' + slot);
+    if (brEl) { brEl.textContent = '&#9209; Stop'; brEl.classList.add('live'); }
+  }).catch(function() { toast('Microphone access denied'); });
+}
+
+function stopRec(slot) {
+  const r = recState[slot];
+  if (!r) return;
+  clearInterval(r.interval);
+  r.mr.stop();
+}
+
+function uploadSlot(slot) {
+  const blob = pending[slot];
+  if (!blob) { toast('No recording to save'); return; }
+  const btn = document.getElementById('bs-' + slot);
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  fetch('/upload/' + slot, {
+    method: 'POST',
+    headers: {'Content-Type': blob.type || 'audio/webm'},
+    body: blob
+  }).then(function(resp) {
+    if (resp.ok) {
+      delete pending[slot];
+      state[slot] = Object.assign({}, state[slot] || {}, {recorded: true});
+      const stEl = document.getElementById('st-' + slot);
+      if (stEl) { stEl.className = 'track-status ok'; stEl.innerHTML = '&#9679; Recorded'; }
+      const bpEl = document.getElementById('bp-' + slot);
+      if (bpEl) bpEl.disabled = false;
+      if (btn) btn.style.display = 'none';
+      toast('Track ' + (slot + 1) + ' saved');
+    } else {
+      toast('Upload failed: ' + resp.status);
+      if (btn) { btn.disabled = false; btn.textContent = '&#8679; Save'; }
+    }
+  }).catch(function() {
+    toast('Upload error');
+    if (btn) { btn.disabled = false; btn.textContent = '&#8679; Save'; }
+  });
+}
+
+function playSlot(slot) {
+  fetch('/play/' + slot).then(function(resp) {
+    if (!resp.ok) { toast('Track not found'); return; }
+    return resp.blob();
+  }).then(function(blob) {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.play().catch(function() { toast('Playback error'); });
+    audio.onended = function() { URL.revokeObjectURL(url); };
+  }).catch(function() { toast('Playback error'); });
+}
+
+function saveConfig() {
+  const active = [];
+  for (let i = 0; i < N; i++) {
+    const cb = document.getElementById('cb-' + i);
+    if (cb && cb.checked) active.push(i);
+  }
+  fetch('/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({active: active})
+  }).then(function(resp) {
+    toast(resp.ok ? 'Active slots saved' : 'Save failed: ' + resp.status);
+  }).catch(function() { toast('Error saving config'); });
+}
+
+loadStatus();
+</script>
+</body>
+</html>
